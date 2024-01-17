@@ -1,0 +1,325 @@
+---
+title: "Exploring Divvy Ride Data"
+author: "Ben Brown"
+output: github_document
+---
+
+``` {r setup, include = FALSE}
+# install packages
+library(tidyverse)
+library(downloader)
+library(here)
+library(lubridate)
+library(ggmap)
+library(RColorBrewer)
+
+# Hide code chunks in the final document
+knitr::opts_chunk$set(
+  echo = FALSE
+)
+
+# Make the filepath to the data folder
+dir <- here("data")
+
+download("https://divvy-tripdata.s3.amazonaws.com/202205-divvy-tripdata.zip",
+         "202205-divvy-tripdata.zip")
+
+# Unzip the data, move it to the data folder, and read it
+tripdata <- read_csv(unzip("202205-divvy-tripdata.zip",
+                           "202205-divvy-tripdata.csv",
+                           exdir = dir))
+
+# Delete the zip file
+file.remove("202205-divvy-tripdata.zip")
+
+# Import weather data, removing unneeded columns.
+# Note Precipitation is a character variable since trace precipitation is denoted with "T".
+weather_data <- read_csv("data/Chicago-weather-data.csv") %>%
+  select(-New_Snow, -Snow_Depth)
+
+```
+
+```{r useful-tables, include = FALSE}
+# Note: this data set considers May rides to be ones with a start date in May.
+
+week_days = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# Split started_at and ended_at into date and time and add a column for day of week (time is created by setting all dates to May 1, 2022)
+tripdata_datetimes <- tripdata %>%
+  mutate(start_date = as_date(started_at),
+         start_time = update(started_at, year = 2022, month = 5, mday = 1),
+         end_date = as_date(ended_at),
+         end_time = update(ended_at, year = 2022, month = 5, mday = 1),
+         day_of_week = factor(weekdays(started_at), levels = week_days)) %>%
+  select(-started_at, -ended_at)
+
+# Create dataset which specifies number of rides and type of rain for each day in May
+tripdata_weather <- tripdata_datetimes %>%
+  # Count number of rides on each day, keep track of the day of the week
+  count(start_date, day_of_week) %>%
+  # Join with weather data
+  inner_join(weather_data, by = c("start_date" = "Date")) %>%
+  # Create column that specifies if there was measured, trace, or no rain
+  mutate(rain_type = if_else(Precipitation == "0.00", 
+                             "No rain",
+                             if_else(Precipitation == "T", 
+                                     "Trace amounts of rain",
+                                     "Measured rain"))) %>%
+  # Put the rain types in order from least to most amount of rain
+  mutate(rain_type = factor(rain_type, levels = c("No rain",
+                                                  "Trace amounts of rain",
+                                                  "Measured rain")))
+
+
+```
+
+For this assignment, I asked the following question: how, when, and where are Divvy bikes used in the city of Chicago, and who uses them? How does that use differ by day, time of day, and neighborhood? The data I analyzed for this project was publicly available Divvy trip data, which can be found [here.](https://divvy-tripdata.s3.amazonaws.com/index.html) Specifically, I chose to analyze ride data from May of 2022, which is the most recent month available. I would have analyzed data for more months, but I was limited in part by file size since there were `r nrow(tripdata)` many rides in May of this year alone. 
+
+To begin my research, I identified a number of factors that could indicate what Chicagoans use Divvy bikes for. These include:
+
+* Day of the week: weekend rides are more likely to be leisure-oriented, whereas weekday rides are more likely to be commutes.
+* Time of day: Rides during rush-hour are more likely to be commutes, whereas leisure rides would be spread more evenly throughout the day.
+* Trip time: people using bikes to ride between neighborhoods will have longer times than people using them to get around their neighborhood. Trip time is also a better indicator of ride length than distance between start and end locations because some rides may be circular.
+* Start/end location: different neighborhoods may use divvy bikes more or less due to differences in population, socioeconomic status, and other factors.
+
+## Day of the Week
+
+First, I analyzed the average number of rides for each day of the week.
+
+``` {r days-of-week}
+
+# Plot the frequency of rides for each day of the week
+tripdata_weather %>%
+  group_by(day_of_week) %>%
+  summarize(avg_rides = mean(n)) %>%
+  ggplot(mapping = aes(x = day_of_week, y = avg_rides)) +
+  geom_col() +
+  labs(
+    title = "May 2022 Divvy Rides by Day of Week",
+    x = NULL,
+    y = "Average number of rides per day"
+  )
+  
+```
+
+This bar graph shows that Saturday had the highest average number of rides, followed by Monday, Thursday, and Sunday. Wednesday had the fewest rides, at around 70% of Saturday's. The fact that Saturday is the highest does suggest that Divvy rides are used more so for leisure than for commuting, but the high number of rides on Monday and Thursday suggest that both leisure and commuting make up a significant number of rides.
+
+However, since the size of this data set is small (31 days), other factors, in particular weather, could be a larger influence than ride type. For instance, Saturdays and Mondays could have had less rain on average than Wednesdays and Fridays. To test this, I compared this data with weather data from the National Weather Service to see if days with rain had fewer rides than days without.
+
+``` {r rain}
+
+# Plot distribution of daily rides for each rain type
+ggplot(
+  data = tripdata_weather,
+  mapping = aes(x = rain_type, y = n)
+) +
+  geom_boxplot() +
+  scale_x_discrete(labels = c("Days with no rain",
+                              "Days with trace amounts of rain",
+                              "Days with measured rain")) +
+  labs(
+    title = "Divvy rides, May 2022",
+    subtitle = "Distribution of rides per day by amount of rain",
+    x = NULL,
+    y = "Number of rides per day",
+    caption = "Source: National Weather Service"
+  )
+```
+
+This boxplot shows that days with measured rain tended to have fewer rides than days with no rain, and that days with trace amounts of rain fell in between. This is not surprising, since people usually do not want to ride a bike on a rainy day.
+
+``` {r weekdays-vs-rain}
+ggplot(
+  data = tripdata_weather,
+  mapping = aes(x = day_of_week, fill = rain_type)
+) +
+  geom_bar(position = "fill") +
+  scale_fill_discrete(name = NULL) +
+  theme(legend.position = "bottom") +
+  labs(
+    title = "Chicago weather, May 2022",
+    subtitle = "Percentage of days with rain by day of week",
+    x = NULL,
+    y = "Proportion of days"
+  )
+
+
+```
+
+This chart shows us that Saturdays and Mondays had the highest proportion of days with no rain, followed by Sundays. Fridays were the rainiest, followed by Thursdays. It seems from this graph that the days of the week with more rides also had better weather, so the differences in the previous graph likely happened because of differences in weather and not from people using Divvy bikes more for weekend leisure rides than weekday commutes.
+
+## Time of Day
+
+Next, I analyzed the times of day that were most common for weekday and weekend rides.
+
+``` {r times-of-day}
+# Create dataset that specifies weekend or weekday
+tripdata_weekends <- filter(tripdata_datetimes, 
+                            day_of_week %in% c("Saturday", "Sunday"))
+tripdata_weekdays <- setdiff(tripdata_datetimes, tripdata_weekends)
+  
+tripdata_daytype <- bind_rows(tripdata_weekdays, tripdata_weekends,
+                              tripdata_datetimes, .id = "id")
+
+# Plot start times
+ggplot(
+  data = tripdata_daytype,
+  mapping = aes(x = start_time, color = id)
+) +
+  geom_freqpoly(bins = 48) + # One bin per half-hour
+  scale_color_discrete(name = NULL, 
+                       labels = c("Weekdays", "Weekends", "All days")) +
+  scale_x_continuous(label = c("12am", "6am", "12pm", "6pm", "12am")) +
+  labs(
+    title = "Divvy rides by time of day, May 2022",
+    x = "Time of start of ride",
+    y = "Total number of rides"
+  )
+
+# Plot end times
+ggplot(
+  data = tripdata_daytype,
+  mapping = aes(x = end_time, color = id)
+) +
+  geom_freqpoly(bins = 48) + # One bin per half-hour
+  scale_color_discrete(name = NULL, 
+                       labels = c("Weekdays", "Weekends", "All days")) +
+  scale_x_continuous(label = c("12am", "6am", "12pm", "6pm", "12am")) +
+  labs(
+    title = "Divvy rides by time of day, May 2022",
+    x = "Time of end of ride",
+    y = "Total number of rides"
+  )
+
+```
+
+The graphs for weekdays and weekends look suprisingly different. For weekdays, a large number of rides begin in the evening and many more rides take place in the morning than in the middle of the day. These peaks correspond with rush hour times. For weekends, rides increase slowly into the early afternoon and stay at a similar level until the evening. The shapes of these graphs suggest that on weekdays, Divvy bikes are mostly used for commuting to and from work, whereas on weekends they are mostly used for leisure. However, the weekday graph continues to rise into the early afternoon like the weekend graph, suggesting that many people use Divvy bikes for leisure on weekdays as well. Combining this result from the previous graph, we see that even though similar numbers of rides occur per day on weekdays and weekends, what kinds of rides they are differ significantly.
+
+## Geographic Location
+
+Finally, I analyzed the data spatially, plotting where in the city the most rides begin and end.
+
+``` {r make_chicago_map, include = FALSE}
+
+# Make the map of Chicago (code taken from the cfss website)
+chi_bb <- c(
+  left = -87.936287,
+  bottom = 41.679835,
+  right = -87.447052,
+  top = 42.000835
+)
+
+
+chicago_stamen <- get_stamenmap(
+  bbox = chi_bb,
+  zoom = 11
+)
+
+```
+
+``` {r plot_ride_locations}
+
+# Filter tripdata to only include trips that start and end on the map. Divvy has locations in Evanston, which is not on this map.
+tripdata_chi <- tripdata %>%
+  filter(between(start_lat, chi_bb[2], chi_bb[4]),
+         between(start_lng, chi_bb[1], chi_bb[3]),
+         between(end_lat, chi_bb[2], chi_bb[4]),
+         between(end_lng, chi_bb[1], chi_bb[3]))
+
+# Create a heatmap for where rides start
+ggmap(chicago_stamen) +
+  stat_density_2d(
+    data = tripdata_chi,
+    aes(
+      x = start_lng,
+      y = start_lat,
+      fill = stat(level)
+    ),
+    alpha = .2,
+    bins = 25,
+    geom = "polygon"
+  ) +
+  scale_fill_gradientn(colors = brewer.pal(7, "YlOrRd"), name = "Rides") +
+  labs(
+   title = "Chicago Divvy Ride Start Locations, May 2022" 
+  )
+
+# Same heatmap but for where rides end
+ggmap(chicago_stamen) +
+  stat_density_2d(
+    data = tripdata_chi,
+    aes(
+      x = end_lng,
+      y = end_lat,
+      fill = stat(level)
+    ),
+    alpha = .2,
+    bins = 25,
+    geom = "polygon"
+  ) +
+  scale_fill_gradientn(colors = brewer.pal(7, "YlOrRd"), name = "Rides") +
+  labs(
+    title = "Chicago Divvy Ride End Locations, May 2022"
+  )
+
+
+```
+
+From these maps, we can see that the most common starting and ending locations are downtown, on the north and north-west sides, and in Hyde Park. Downtown is the most populated area of the city, so one would expect it to have the highest number of rides. Each of these hotspots are in areas of higher socioeconomic status, which suggests a positive correlation between socioeconomic status and Divvy ridership.
+
+The Hyde Park hotspot lies notably between Cottage Grove and Woodlawn, around the University of Chicago, which suggests that UChicago students, faculty and staff use Divvy bikes a lot. I hypothesized that the average trip time for rides two or from Hyde Park would be shorter than for all rides because of students using Divvy bikes to get around the university.
+
+``` {r hyde-park}
+# Get all trips which started or ended between 63rd and 51st and east of Cottage Grove
+tripdata_hydepark <- tripdata %>%
+  filter((between(start_lat, 41.7800, 41.8030) & start_lng > -87.6066) |
+          (between(end_lat, 41.7800, 41.8030) & end_lng > -87.6066)) %>%
+  # Combine with all the data for time comparison. Note id = 1 means that ride is to or from Hyde Park
+  bind_rows(tripdata, .id = "id") %>%
+  # Add column for time length of trip
+  mutate(length = as.integer(difftime(ended_at, started_at))) %>%
+  # Filter outlier rides which took longer than 2 hours, as well as rides which lasted less than 15 seconds
+  filter(between(length, 15, 7200))
+
+# Density plot 
+ggplot(
+  data = tripdata_hydepark,
+  mapping = aes(x = length/60, color = id)
+) + 
+  geom_density() +
+  scale_x_sqrt(limits = c(0.25, 120), breaks = c(0, 5, 10, 30, 60, 120)) +
+  scale_color_discrete(name = NULL, 
+                       labels = c("Rides to or from Hyde Park", "All rides")
+  ) +
+  theme(legend.position = "bottom") +
+  labs(
+    title = "Divvy ride lengths, May 2022",
+    x = "Ride length (minutes)"
+  )
+  
+# Graph the same data as a boxplot
+ggplot(
+  data = tripdata_hydepark,
+  mapping = aes(x = id, y = length/60)
+) + 
+  geom_boxplot() +
+  scale_y_sqrt(limits = c(0.25, 120), breaks = c(0, 5, 10, 30, 60, 120)) +
+  scale_x_discrete(labels = c("Rides to or from Hyde Park", "All rides")
+  ) +
+  labs(
+    title = "Divvy ride lengths, May 2022",
+    x = NULL,
+    y = "Ride length (minutes)"
+  )
+  
+  
+```
+
+These graphs shows that rides to or from Hyde Park are typically shorter than all rides. In fact, the boxplot shows that nearly half of the rides to or from Hyde Park are under 5 minutes long, as opposed to less than a quarter of all rides. This suggests that a greater than average proportion of riders in Hyde Park use Divvy rides to get around their neighborhood or to get to and from adjacent neighborhoods. This is likely because of UChicago students, faculty, and staff, [who receive a discounted membership rate,](https://safety-security.uchicago.edu/services/biking/) using Divvy bikes to get around campus. To test this hypothesis, one could run the same analysis for a month in the summer where class is not in session and compare the results.
+
+In addition, the density graph shows a second, smaller peak of rides to or from Hyde Park lasting from around 30 to 50 minutes. This is around the time it takes to bike from Hyde Park to downtown, the biggest hotspot for ride starts and ends, so these rides are likely between Hyde Park and downtown. It's possible that other neighborhoods have peaks like this one at the approximate time it takes to bike between there and downtown because it is such a popular destination.
+
+## Conclusion
+
+In conclusion, I discovered that there Chicagoans use Divvy bikes for a number of significant reasons, but those reasons can differ significantly depending on the day of the week and the neighborhood. Weather also has a large effect on how many rides occur on a given day, and can potentially confound the relationship between other variables. For future research, one could analyze rides to and from other neighborhoods besides Hyde Park, or use data from multiple months or years to analyze how Divvy ridership has changed over time.
+
